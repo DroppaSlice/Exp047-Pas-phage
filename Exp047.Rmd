@@ -1,0 +1,248 @@
+---
+title: "Exp047"
+author: "Dennis Zhu"
+date: "2024-10-25"
+output: html_document
+---
+## Exp047-1: Writing a function to convert Snapgene feature files into GFF3 file format
+
+I found that there is no direct way to write out the annotated features in a Snapgene .dna file out to a gff feature file. Since, I may want to work with GFF files in the future using Snapgene annotations, I wrote an R function 'snap_to_gff()' that reads the snapgene feature export table, cleans it, and spits it out as a GFF file format. 
+
+I then test the code using a set of prophage regions from the E2348C EPEC genome. 
+
+```{r 01-snap_to_gff}
+library(microseq)
+library(stringr)
+library(dplyr)
+
+#-----Defining the function snap_to_gff-----#
+snap_to_gff <- function(filepath, write = T, outfile, features = c("name", "position", "length", "strand", "type"), filter = TRUE, types = c("gene", "ncRNA")){
+  
+  #-----error handling messages to check input arguments-----#
+  if(write == T & missing(outfile)){
+    stop("Error: Must provide outfile if writing gff!")
+  }
+  
+  if(!is.vector(features, mode = "character")){
+    stop("Error: \'feature\' should be a character vector ")
+  }
+  
+  if(length(features) > 5){
+    stop("Error: \'feature'\ should not have length greater than 5")
+  }
+  
+  #-----specify the data features exported from Snapgene-----#
+  #by default this function expects that all 5 features are exported into tsv format
+  col.names <- features
+  
+  #-----reading in snap feature table-----
+  snap_table <- read.table(filepath) %>%
+    rename_with(~col.names)
+  
+  if(filter == T){
+    snap_table <- snap_table %>%
+    filter(type %in% types)
+  }
+  
+  #-----cleaning snapgene data-----#
+  start_v <- as.numeric(str_extract(str_remove_all(snap_table$position, ","), "^\\d+"))
+  end_v <- start_v + as.numeric(str_remove_all(snap_table$length, ",")) - 1
+  strand_v <- if_else(snap_table$strand == "=>", "+", "-")
+  attributes_v <- paste0("ID=", snap_table$name)
+  
+  #-----constructing GFF data frame to match structure of standard GFF-----#
+  gff_table <- tibble(
+    Seqid = snap_table$name,
+    source = "Snapgene",
+    type = "gene", 
+    start = start_v,
+    end = end_v,
+    score = ".",
+    strand = strand_v,
+    phase = 0,
+    attributes = attributes_v
+  )
+  
+  #-----writing gff file-----#
+  if(write == T & !missing(outfile)){
+    writeGFF(gff.table = gff_table, out.file = outfile)
+  }
+}
+
+#-----setting up test examples-----#
+pathname <- "inputs/prophages/"
+files <- list.files(path = "inputs/prophages/", pattern = "*.txt")
+
+#-----run snap_to_gff() using a loop through the specified files-----#
+for(file in files){
+  filepath_ <- paste0(pathname, file)
+  outfile_ <- paste0("outputs/", str_remove(file, ".txt"), ".gff3")
+  
+  snap_to_gff(filepath = filepath_, outfile = outfile_)
+}
+```
+
+## Exp047-2: Testing out a pairwise phage genome alignment
+
+```{r 02-generate_synteny}
+library(DECIPHER)
+library(stringr)
+
+phage_path <- "inputs/phage_genomes"
+prophage_path <- "inputs/prophages"
+
+phage_files <- list.files(path = phage_path, pattern = ".fasta", full.names = T)
+names(phage_files) <- str_remove(list.files(path = phage_path, pattern = ".fasta"), ".fasta")
+prophage_files <- list.files(path = prophage_path, pattern = ".fasta", full.names = T)
+names(prophage_files) <- str_remove(list.files(path = prophage_path, pattern = ".fasta"), ".fasta")
+
+db <- dbConnect(SQLite(), ":memory:")
+synteny_list <- list()
+alignments_list <- list()
+
+for (i in 1:length(phage_files)){
+  fas <- c(phage_files[i], prophage_files)
+  
+  for (i in seq_along(fas)) { 
+    Seqs2DB(fas[i],
+            type = "FASTA",
+            db,
+            tblName = names(fas[1]),
+            identifier = names(fas[i]))
+  }
+  
+  synteny_list[[names(fas[1])]] <-  FindSynteny(dbFile = db,
+                                                tblName = names(fas[1]),
+                                                verbose = T)
+  alignments_list[[names(fas[1])]] <- AlignSynteny(synteny = synteny_list[[names(fas[1])]],
+                                                   db = db,
+                                                   tblName = names(fas[1]))
+}
+
+for(i in 1:length(synteny_list)){
+  pairs(synteny_list[[i]], boxBlocks=T)
+  plot(synteny_list[[i]])
+}
+```
+
+```{r 03-comparing_synteny}
+library(DECIPHER)
+library(stringr)
+
+phage_path <- "inputs/phage_genomes"
+prophage_path <- "inputs/prophages"
+
+phage_files <- list.files(path = phage_path, pattern = ".fasta", full.names = T)
+names(phage_files) <- str_remove(list.files(path = phage_path, pattern = ".fasta"), ".fasta")
+prophage_files <- list.files(path = prophage_path, pattern = ".fasta", full.names = T)
+names(prophage_files) <- str_remove(list.files(path = prophage_path, pattern = ".fasta"), ".fasta")
+
+db <- dbConnect(SQLite(), ":memory:")
+
+for (i in seq_along(phage_files)){
+  Seqs2DB(phage_files[i],
+          type = "FASTA",
+          db,
+          identifier = names(phage_files[i]),
+          tblName = "phages"
+  )
+}
+
+
+for (i in seq_along(prophage_files)){
+  Seqs2DB(prophage_files[i],
+          type = "FASTA",
+          db,
+          identifier = names(prophage_files[i]),
+          tblName = "prophages"
+  )
+}
+
+phage_synteny <- FindSynteny(dbFile = db,
+                             tblName = "phages",
+                             verbose = T)
+
+prophage_synteny <- FindSynteny(dbFile = db,
+                             tblName = "prophages",
+                             verbose = T)
+
+pairs(phage_synteny, boxBlocks = T)
+pairs(prophage_synteny, boxBlocks = T)
+```
+
+## Exp047-4: Making and running phage blast database from Millard Lab dataset
+
+First we are making a new local blast nucleotide database from the phage genomes using the 'genomes_excluding_refseq.fa' file that I downloaded from the Millard Lab GitHub page. In this experiment, I am specifically using the November 6, 2024 update. 
+
+I am running the 'makeblastdb' command from the blast+ suite using a python wrapper script to generate a blast database. 
+
+```{r 04.1-millard_makedb}
+library(reticulate)
+
+py_run_file(file = "src/04.1-millard_makedb.py")
+```
+Next, I run a 'blastn' search using the locally installed blast+ suite with the Millard Lab bacteriophage genome database as the subject and the Pas sRNA gene sequence list as the query. Once again, this is all run through a python wrapper script. 
+
+```{r 04.2-millard_blast}
+library(reticulate)
+
+py_run_file(file = "src/04.2-millard_blast.py")
+```
+
+Cleaning, filtering, annotating, and summarizing blast results. 
+I wrote a new function called 'pas_filter()' to set stricter identity cutoffs for pasA1/A2 hits and pasD1/D2 hits. By default, the values for this function are 95% and 98%, respectively. 
+
+The summarization step uses a similar approach to what I used to generate presence absence tables in Exp048. Blast hits for multiple query sequences are in a long format by default, so I used the 'pivot_wider()' function with the 'qseqid' as the naming factor an filled the matches with their percentage identity. I wrote out the summarized results of the blast search in a file 'outputs/millard_blast_summarized.csv'. 
+
+```{r 04.3-millard_cleaning}
+library(readr)
+library(dplyr)
+library(tidyr)
+
+#-----read in the blast results using the read_tsv() function from the readr package-----#
+millard_blast <- read_tsv(file = "outputs/millard_pas_blast.txt",
+                          col_names = c("qseqid", "sseqid", "pident", "length", "qcovs", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qseq", "sseq")) %>% 
+  mutate(qseqid = factor(qseqid))
+
+#-----filtering steps-----#
+#writing a homolog filtering function specifically for distinguishing pasA1/A2 and pasD1/D2 homologs
+#inputs are a data frame containing blast results with both a 'pident' column and a column (default 'qseqid') holding pasA1/A2 info
+pas_filter <- function(blast_results, id_col = "qseqid", a.limit = 95, d.limit = 98){
+  list <- split(blast_results, f = blast_results[,id_col])
+  homologs <- c("pasA1", "pasA2", "pasD1", "pasD2")
+    for(gene in homologs){
+    #filter pasA1 and pasA2 dfs for >= 95% sequence identity hits
+    if(gene == "pasA1" | gene == "pasA2"){
+      list[[gene]] <- dplyr::filter(list[[gene]], pident >= 95)
+   }
+    #filter pasD1 and pasD2 dfs for >= 98% sequence identity hits
+   if(gene == "pasD1" | gene == "pasS2"){
+    list[[gene]] <- dplyr::filter(list[[gene]], pident >= 98)
+   }
+    }
+  df <- bind_rows(list)
+  return(df)
+}
+#running homolog filtering
+millard_filtered <- pas_filter(millard_blast)
+
+#-----adding Millard lab metadata to blast results-----#
+millard_metadata <- read_tsv(file = "inputs/millard_20241106/metadata.tsv") %>%
+  mutate(sseqid = factor(Accession), Accession = NULL)
+#joining
+millard_df_full <- millard_filtered %>%
+  left_join(millard_metadata, by = "sseqid")
+write.csv(x = millard_df_full, file = "outputs/millard_blast_filtered_full.csv")
+
+#-----summarizing based on unique bacteriophage genomes-----#
+millard_df_summarized <- millard_df_full %>%
+  mutate(qseqid = factor(qseqid, levels = c("pasA1", "pasA2", "pasB", "pasC", "pasD1", "pasD2")), phage = factor(Description)) %>%
+  #fill values are the nucleotide sequence identity for each hit in each respective genome
+  #this would not work as cleanly if any genome had more than one hit for a given sRNA
+  pivot_wider(id_cols = phage, names_from = qseqid, values_from = pident, values_fill = list(pident = 0))
+write.csv(x = millard_df_summarized, file = "outputs/millard_blast_summarized.csv", row.names = F)
+```
+
+```{r testing}
+files <- list.files(path = "inputs/prophages/", pattern = "*.txt")
+```
